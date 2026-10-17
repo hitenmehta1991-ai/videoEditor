@@ -70,3 +70,8 @@ You can also test an end-to-end export using the integration test if FFmpeg is a
 ## License
 
 MIT. This is independent software and not affiliated with Instagram, Edits or Meta. Check the FFmpeg/Homebrew build's third-party codec license terms before commercial redistribution or bundling FFmpeg inside a packaged app.
+
+
+## v0.2 timeline update
+
+See [V0.2.md](V0.2.md) for the available timeline/image features, validation, setup, and remaining roadmap items.

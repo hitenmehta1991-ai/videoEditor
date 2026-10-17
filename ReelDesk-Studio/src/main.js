@@ -5,7 +5,8 @@ const path = require('node:path');
 const fs = require('node:fs');
 const { pathToFileURL } = require('node:url');
 const crypto = require('node:crypto');
-const { capture, findBinary, probeFile, normalizeProject, runExport } = require('./exporter');
+const { importMedia, cleanup } = require('./media');
+const { capture, findBinary, normalizeProject, runExport } = require('./exporter');
 
 let mainWindow = null;
 let currentExport = null;
@@ -24,7 +25,7 @@ function recordAsset(filePath, meta, type = 'video') {
   const id = crypto.randomUUID();
   const entry = { id, name: safeName(filePath), path: filePath, type, ...meta };
   assets.set(id, entry);
-  return { id, name: entry.name, url: type === 'video' ? pathToFileURL(filePath).href : undefined,
+  return { id, name: entry.name, type, thumbnails: entry.thumbnails || [], url: type !== 'music' ? pathToFileURL(entry.previewPath || filePath).href : undefined,
     duration: entry.duration, width: entry.width, height: entry.height, hasAudio: entry.hasAudio };
 }
 
@@ -32,18 +33,25 @@ function setupIPC() {
   ipcMain.handle('choose-videos', async e => {
     assertCaller(e);
     const selection = await dialog.showOpenDialog(mainWindow, {
-      title: 'Import video clips', properties: ['openFile', 'multiSelections'],
-      filters: [{ name: 'Video clips', extensions: ['mp4', 'mov', 'm4v', 'webm', 'mkv', 'avi'] }]
+      title: 'Import videos and images', properties: ['openFile', 'multiSelections'],
+      filters: [{ name: 'Video clips', extensions: ['mp4', 'mov', 'm4v', 'webm', 'mkv', 'avi', 'jpg', 'jpeg', 'png', 'webp', 'heic', 'heif'] }]
     });
     if (selection.canceled) return [];
     const clips = [];
     const errors = [];
     for (const file of selection.filePaths.slice(0, 50)) {
-      try { clips.push(recordAsset(file, await probeFile(file))); }
+      try { const media = await importMedia(file); clips.push(recordAsset(file, media, media.type)); }
       catch (err) { errors.push(`${safeName(file)}: ${err.message}`); }
     }
     if (errors.length) dialog.showMessageBox(mainWindow, { type: 'warning', title: 'Some files could not be imported', message: errors.join('\n').slice(0, 1800) });
     return clips;
+  });
+  ipcMain.handle('drop-media', async (e, paths) => {
+    assertCaller(e);
+    if (!Array.isArray(paths) || paths.length > 50 || paths.some(p => typeof p !== 'string')) throw Error('Drop up to 50 media files');
+    const result = [];
+    for (const file of paths) { const media = await importMedia(file); result.push(recordAsset(file, media, media.type)); }
+    return result;
   });
   ipcMain.handle('choose-music', async e => {
     assertCaller(e);
@@ -67,12 +75,12 @@ function setupIPC() {
     if (dialogResult.canceled || !dialogResult.filePath) return null;
     const clips = project.clips.map(c => {
       const asset = assets.get(c.id);
-      if (!asset || asset.type !== 'video') throw new Error('Project refers to an unavailable clip');
-      return { path: asset.path, start: c.start, end: c.end, speed: c.speed };
+      if (!asset || !['video', 'image'].includes(asset.type)) throw new Error('Project refers to an unavailable clip');
+      return { path: asset.originalPath || asset.path, type: asset.type, start: c.start, end: c.end, speed: c.speed };
     });
     const music = project.musicId ? assets.get(project.musicId) : null;
     if (project.musicId && (!music || music.type !== 'music')) throw new Error('Project soundtrack is unavailable');
-    const payload = { format: 'reeldesk-project', version: 1, savedAt: new Date().toISOString(),
+    const payload = { format: 'reeldesk-project', version: 2, savedAt: new Date().toISOString(),
       ...project, clips, musicPath: music?.path || null };
     delete payload.musicId;
     fs.writeFileSync(dialogResult.filePath, JSON.stringify(payload, null, 2), 'utf8');
@@ -90,7 +98,8 @@ function setupIPC() {
     const clips = [];
     for (const c of data.clips) {
       if (typeof c.path !== 'string' || !fs.existsSync(c.path)) throw new Error(`Missing project video: ${String(c.path)}`);
-      clips.push({ ...recordAsset(c.path, await probeFile(c.path)), start: c.start, end: c.end, speed: c.speed });
+      const media = await importMedia(c.path);
+      clips.push({ ...recordAsset(c.path, media, media.type), start: c.start, end: c.end, speed: c.speed });
     }
     let music = null;
     if (data.musicPath) {
@@ -111,7 +120,7 @@ function setupIPC() {
     });
     if (saveResult.canceled || !saveResult.filePath) return { cancelled: true };
     const output = saveResult.filePath;
-    if (normalized.clips.some(c => c.path === output) || normalized.music?.path === output) {
+    if (normalized.clips.some(c => (c.path === output || c.originalPath === output)) || normalized.music?.path === output) {
       throw new Error('Choose an output path different from your source files');
     }
     // The child process uses argument arrays, not shell commands.
@@ -153,4 +162,5 @@ app.whenReady().then(() => {
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
 app.on('before-quit', () => { if (currentExport) currentExport.cancel(); });
+app.on('will-quit', cleanup);
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
