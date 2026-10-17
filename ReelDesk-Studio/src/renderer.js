@@ -7,8 +7,27 @@ const state = {
   titleColor: 'white', titlePosition: 'bottom', exporting: false, lastExport: null
 };
 const video = $('preview');
+const history = new Timeline.History();
+let pixelsPerSecond = 40;
+let imageTime = 0;
+let imagePlaying = false;
+let dragIndex = null;
+function snapshot() {
+  const { exporting, lastExport, ...editable } = state;
+  return structuredClone(editable);
+}
+function checkpoint() { history.push(snapshot()); updateHistory(); }
+function updateHistory() { $('undo').disabled = !history.past.length; $('redo').disabled = !history.future.length; }
+function restore(direction) {
+  const saved = history[direction](snapshot()); if (!saved) return;
+  video.pause(); imagePlaying = false; Object.assign(state, saved);
+  const target = state.selected; state.selected = -1; setSelection(target); syncControls(); updateHistory();
+}
+function localTime() { const c = selectedClip(); return !c ? 0 : c.type === 'image' ? imageTime : (video.currentTime - c.start) / c.speed; }
+function seekLocal(time) { const c = selectedClip(); if (!c) return; const t = Math.max(0, Math.min(duration(c), time)); if (c.type === 'image') imageTime = t; else video.currentTime = c.start + t * c.speed; updatePlayback(); }
 
-function duration(clip) { return (clip.end - clip.start) / clip.speed; }
+
+function duration(clip) { return Timeline.duration(clip); }
 function totalDuration() { return state.clips.reduce((sum, c) => sum + duration(c), 0); }
 function timeLabel(seconds) {
   const n = Math.max(0, Math.floor(Number(seconds) || 0));
@@ -37,7 +56,7 @@ function titleTime() {
   const c = selectedClip(); if (!c) return -1;
   let before = 0;
   for (let i = 0; i < state.selected; i++) before += duration(state.clips[i]);
-  return before + (video.currentTime - c.start) / c.speed;
+  return before + localTime();
 }
 function updateOverlay() {
   const t = titleTime();
@@ -49,26 +68,35 @@ function updateOverlay() {
 function setSelection(index) {
   if (index < 0 || index >= state.clips.length) index = -1;
   const changing = index !== state.selected;
+  if (changing) { imagePlaying = false; imageTime = 0; }
   state.selected = index;
   const c = selectedClip();
+  $('imagePreview').hidden = !c || c.type !== 'image';
+  $('imageDuration').hidden = $('imageDurationLabel').hidden = !c || c.type !== 'image';
   if (!c) {
     video.pause(); video.removeAttribute('src'); video.load(); video.style.display = 'none';
     $('emptyPreview').hidden = false;
     $('selectedHint').textContent = 'Choose a clip to adjust the trim.';
     $('trimStart').disabled = $('trimEnd').disabled = $('speed').disabled = true;
   } else {
-    $('emptyPreview').hidden = true; video.style.display = 'block';
-    if (changing || !video.getAttribute('src')) {
+    $('emptyPreview').hidden = true; video.style.display = c.type === 'image' ? 'none' : 'block';
+    $('imagePreview').src = c.type === 'image' ? c.url : '';
+    $('imageDuration').value = duration(c);
+    if (c.type === 'image') video.pause();
+    if (c.type !== 'image' && (changing || video.getAttribute('src') !== c.url)) {
       video.pause(); video.src = c.url;
       video.load();
       video.addEventListener('loadedmetadata', () => { if (c === selectedClip()) { video.currentTime = c.start; updatePlayback(); } }, { once: true });
     }
+    if (changing && c.type !== 'image' && video.readyState >= 1) video.currentTime = c.start;
     $('selectedHint').textContent = `${c.name} • ${c.width} × ${c.height}`;
     $('trimStart').disabled = $('trimEnd').disabled = $('speed').disabled = false;
     $('trimStart').value = Number(c.start.toFixed(2));
     $('trimEnd').value = Number(c.end.toFixed(2));
     $('trimEnd').max = c.duration;
     $('trimStart').max = c.duration;
+    $('speed').disabled = c.type === 'image';
+    video.playbackRate = c.speed;
     $('speed').value = String(c.speed);
   }
   renderClipList(); renderTimeline(); updatePlayback();
@@ -93,31 +121,60 @@ function renderClipList() {
   });
 }
 function renderTimeline() {
-  const view = $('timeline'); view.replaceChildren();
-  $('totalDuration').textContent = `${timeLabel(totalDuration())} total`;
-  if (!state.clips.length) { const div = document.createElement('div'); div.className = 'timeline-empty'; div.textContent = 'Your timeline is empty · Add clips to begin'; view.append(div); return; }
+  const view = $('timeline'); const scroll = view.scrollLeft; view.replaceChildren();
+  $('totalDuration').textContent = `${totalDuration().toFixed(2)}s total`;
+  if (!state.clips.length) { const div = document.createElement('div'); div.className = 'timeline-empty'; div.textContent = 'Drop videos or images here, or use Import media'; view.append(div); return; }
+  let before = 0;
   state.clips.forEach((c, i) => {
-    const item = document.createElement('button'); item.type = 'button';
+    const item = document.createElement('div'); item.tabIndex = 0; item.setAttribute('role', 'button');
     item.className = `timeline-clip ${i === state.selected ? 'active' : ''}`;
-    const icon = document.createElement('div'); icon.textContent = '▤';
-    const content = document.createElement('div'); const name = document.createElement('strong');
-    name.textContent = `${i + 1}. ${c.name}`; const meta = document.createElement('span');
-    meta.textContent = `${timeLabel(duration(c))} • ${c.speed}×`; content.append(name, meta);
-    item.append(icon, content); item.addEventListener('click', () => setSelection(i)); view.append(item);
+    item.style.width = `${Math.max(2, duration(c) * pixelsPerSecond)}px`; item.draggable = true;
+    item.title = `${c.name}: ${before.toFixed(2)}s – ${(before + duration(c)).toFixed(2)}s. Drag to reorder; drag edges to trim.`;
+    const strip = document.createElement('div'); strip.className = 'thumbnail-strip';
+    for (const src of c.thumbnails || []) { const img = document.createElement('img'); img.src = src; img.alt = ''; img.draggable = false; strip.append(img); }
+    const name = document.createElement('strong'); name.textContent = `${before.toFixed(1)}s · ${c.name}`;
+    const meta = document.createElement('span'); meta.textContent = `${duration(c).toFixed(2)}s · ${c.speed}×`;
+    item.append(strip, name, meta);
+    for (const edge of ['start', 'end']) {
+      const handle = document.createElement('div'); handle.className = `trim-handle ${edge}`; handle.title = `Trim ${edge}`;
+      handle.addEventListener('pointerdown', e => {
+        e.preventDefault(); e.stopPropagation(); setSelection(i); checkpoint();
+        const original = { ...state.clips[i] }; const origin = e.clientX;
+        const move = ev => {
+          state.clips[i] = Timeline.trim(original, edge, original[edge] + (ev.clientX - origin) / pixelsPerSecond * original.speed);
+          const edited = state.clips[i]; $('timeline').children[i].style.width = `${Math.max(2, duration(edited) * pixelsPerSecond)}px`;
+          $('trimStart').value = edited.start.toFixed(2); $('trimEnd').value = edited.end.toFixed(2);
+        };
+        const up = () => { document.removeEventListener('pointermove', move); document.removeEventListener('pointerup', up); seekLocal(0); setSelection(i); };
+        document.addEventListener('pointermove', move); document.addEventListener('pointerup', up, { once: true });
+      });
+      item.append(handle);
+    }
+    const head = document.createElement('div'); head.className = 'clip-playhead'; item.append(head);
+    item.addEventListener('click', e => { if (e.target.closest('.trim-handle')) return; const fraction = Math.max(0, Math.min(1, (e.clientX - item.getBoundingClientRect().left) / item.clientWidth)); setSelection(i); seekLocal(fraction * duration(c)); });
+    item.addEventListener('keydown', e => { if (e.key === 'Enter') setSelection(i); });
+    item.addEventListener('dragstart', e => { dragIndex = i; e.dataTransfer.setData('text/plain', String(i)); e.dataTransfer.effectAllowed = 'move'; });
+    item.addEventListener('dragend', () => { dragIndex = null; });
+    item.addEventListener('dragover', e => { e.preventDefault(); });
+    item.addEventListener('drop', e => { if (dragIndex === null) return; e.preventDefault(); e.stopPropagation(); const from = dragIndex; dragIndex = null; if (from !== i) { checkpoint(); state.clips = Timeline.reorder(state.clips, from, i); state.selected = -1; setSelection(i); } });
+    view.append(item); before += duration(c);
   });
+  view.scrollLeft = scroll;
 }
 function moveClip(index, amount) {
   const next = index + amount;
   if (next < 0 || next >= state.clips.length) return;
-  const selectedId = selectedClip()?.id;
+  checkpoint();
+  const selectedObject = selectedClip();
   [state.clips[index], state.clips[next]] = [state.clips[next], state.clips[index]];
-  setSelection(state.clips.findIndex(c => c.id === selectedId));
+  setSelection(state.clips.findIndex(c => c === selectedObject));
   updateOverlay();
 }
 function removeClip(index) {
-  const c = selectedClip(); const selectedId = c?.id;
+  checkpoint();
+  const selectedObject = selectedClip();
   state.clips.splice(index, 1);
-  const found = state.clips.findIndex(x => x.id === selectedId);
+  const found = state.clips.findIndex(x => x === selectedObject);
   const target = found < 0 ? Math.min(index, state.clips.length - 1) : found;
   // Refresh media even when selection index remains the same but its clip changed.
   state.selected = -1;
@@ -125,11 +182,13 @@ function removeClip(index) {
   updateOverlay();
 }
 function updatePlayback() {
-  const c = selectedClip();
-  $('currentTime').textContent = c ? timeLabel(Math.max(0, video.currentTime - c.start)) : '00:00';
-  $('endTime').textContent = c ? timeLabel(c.end - c.start) : '00:00';
-  $('seek').value = c ? String(Math.max(0, Math.min(100, (video.currentTime - c.start) / (c.end - c.start) * 100))) : '0';
-  $('playButton').textContent = video.paused ? '▶' : 'Ⅱ';
+  const c = selectedClip(); const t = c ? Math.max(0, localTime()) : 0;
+  $('currentTime').textContent = `${t.toFixed(2)}s`;
+  $('endTime').textContent = c ? `${duration(c).toFixed(2)}s` : '0.00s';
+  $('seek').value = c ? String(Math.max(0, Math.min(100, t / duration(c) * 100))) : '0';
+  $('playButton').textContent = (c?.type === 'image' ? !imagePlaying : video.paused) ? '▶' : 'Ⅱ';
+  const head = document.querySelector('.timeline-clip.active .clip-playhead');
+  if (head) head.style.left = `${Math.min(100, t / duration(c) * 100)}%`;
   updateOverlay();
 }
 function syncControls() {
@@ -145,26 +204,27 @@ function syncControls() {
 }
 function applyFrame() {
   $('videoFrame').style.aspectRatio = state.ratio.replace(':', ' / ');
-  video.style.objectFit = state.mode === 'crop' ? 'cover' : 'contain';
+  $('imagePreview').style.objectFit = video.style.objectFit = state.mode === 'crop' ? 'cover' : 'contain';
 }
 async function importVideos() {
   try {
     const imported = await window.reeldesk.chooseVideos();
     if (!imported.length) return;
+    checkpoint();
     const startingLength = state.clips.length;
     state.clips.push(...imported.map(c => ({ ...c, start: 0, end: c.duration, speed: 1 })));
     if (state.clips.length > 50) state.clips.length = 50;
     setSelection(startingLength < 50 ? startingLength : 0);
-    setStatus(`${imported.length} clip(s) imported • Use ↑ ↓ to reorder`);
+    setStatus(`${imported.length} clip(s) imported • Drag clips to reorder; drag edges to trim`);
   } catch (err) { setStatus(err.message, true); }
 }
 function editTrim(which, value) {
   const c = selectedClip(); if (!c) return;
   const parsed = Number(value); if (!Number.isFinite(parsed)) return;
-  if (which === 'start') c.start = Math.max(0, Math.min(c.end - 0.05, parsed));
-  else c.end = Math.max(c.start + 0.05, Math.min(c.duration, parsed));
+  Object.assign(c, Timeline.trim(c, which, parsed));
   $('trimStart').value = Number(c.start.toFixed(2)); $('trimEnd').value = Number(c.end.toFixed(2));
   if (video.currentTime < c.start || video.currentTime > c.end) video.currentTime = c.start;
+  seekLocal(Math.min(localTime(), duration(c)));
   renderClipList(); renderTimeline(); updatePlayback();
 }
 async function exportVideo() {
@@ -194,6 +254,7 @@ async function saveProject() {
 async function openProject() {
   try {
     const project = await window.reeldesk.openProject(); if (!project) return;
+    checkpoint();
     Object.assign(state, { clips: project.clips, music: project.music, ratio: project.ratio || '9:16',
       mode: project.mode || 'fit', resolution: Number(project.resolution || 1080),
       musicVolume: Number(project.musicVolume ?? 0.2), title: project.title || '',
@@ -210,30 +271,34 @@ $('exportButton').addEventListener('click', exportVideo);
 $('saveProject').addEventListener('click', saveProject);
 $('openProject').addEventListener('click', openProject);
 $('musicButton').addEventListener('click', async () => {
-  try { const music = await window.reeldesk.chooseMusic(); if (music) { state.music = music; syncControls(); setStatus('Music selected • It will play in the export'); } }
+  try { const music = await window.reeldesk.chooseMusic(); if (music) { checkpoint(); state.music = music; syncControls(); setStatus('Music selected • It will play in the export'); } }
   catch (err) { setStatus(err.message, true); }
 });
-$('removeMusic').addEventListener('click', () => { state.music = null; syncControls(); });
+$('removeMusic').addEventListener('click', () => { checkpoint(); state.music = null; syncControls(); });
 $('musicVolume').addEventListener('input', e => { state.musicVolume = Number(e.target.value) / 100; $('musicVolumeLabel').textContent = `${e.target.value}%`; });
 $('playButton').addEventListener('click', async () => {
   const c = selectedClip(); if (!c) return;
-  if (video.paused) { if (video.currentTime >= c.end - 0.05) video.currentTime = c.start;
-    try { await video.play(); } catch { setStatus('This codec may not preview in Electron; export may still work', true); } }
+  if (localTime() >= duration(c) - 0.01) seekLocal(0);
+  if (c.type === 'image') { imagePlaying = !imagePlaying; }
+  else if (video.paused) { try { await video.play(); } catch { setStatus('This codec cannot preview; export may still work', true); } }
   else video.pause();
   updatePlayback();
 });
-video.addEventListener('timeupdate', () => { const c = selectedClip(); if (c && video.currentTime >= c.end) { video.pause(); video.currentTime = c.end; } updatePlayback(); });
+video.addEventListener('timeupdate', () => { const c = selectedClip(); if (c && c.type !== 'image' && video.currentTime >= c.end) { video.pause(); video.currentTime = c.end; } updatePlayback(); });
+let lastFrame = performance.now();
+function tick(now) { const elapsed = (now - lastFrame) / 1000; lastFrame = now; const c = selectedClip(); if (imagePlaying && c?.type === 'image') { imageTime = Math.min(duration(c), imageTime + elapsed); if (imageTime >= duration(c)) imagePlaying = false; updatePlayback(); } requestAnimationFrame(tick); }
+requestAnimationFrame(tick);
 video.addEventListener('pause', updatePlayback);
 video.addEventListener('play', updatePlayback);
 video.addEventListener('error', () => { if (selectedClip()) setStatus('Preview unavailable for this codec; try an MP4/H.264 clip', true); });
 $('seek').addEventListener('input', e => {
   const c = selectedClip(); if (!c) return;
-  video.currentTime = c.start + Number(e.target.value) / 100 * (c.end - c.start);
+  seekLocal(Number(e.target.value) / 100 * duration(c));
   updatePlayback();
 });
 $('trimStart').addEventListener('change', e => editTrim('start', e.target.value));
 $('trimEnd').addEventListener('change', e => editTrim('end', e.target.value));
-$('speed').addEventListener('change', e => { const c = selectedClip(); if (!c) return; c.speed = Number(e.target.value); renderTimeline(); renderClipList(); updateOverlay(); });
+$('speed').addEventListener('change', e => { const c = selectedClip(); if (!c) return; c.speed = Number(e.target.value); video.playbackRate = c.speed; renderTimeline(); renderClipList(); updateOverlay(); });
 $('ratio').addEventListener('change', e => { state.ratio = e.target.value; applyFrame(); });
 $('mode').addEventListener('change', e => { state.mode = e.target.value; applyFrame(); });
 $('resolution').addEventListener('change', e => { state.resolution = Number(e.target.value); });
@@ -251,3 +316,30 @@ document.addEventListener('keydown', e => {
   }
 });
 syncControls();
+
+$('undo').addEventListener('click', () => restore('undo'));
+$('redo').addEventListener('click', () => restore('redo'));
+$('split').addEventListener('click', () => {
+  try { const next = Timeline.split(state.clips, state.selected, localTime()); checkpoint(); state.clips = next; const target = state.selected + 1; state.selected = -1; setSelection(target); seekLocal(0); }
+  catch (err) { setStatus(err.message, true); }
+});
+$('zoom').addEventListener('input', e => { pixelsPerSecond = Number(e.target.value); renderTimeline(); updatePlayback(); });
+$('imageDuration').addEventListener('change', e => {
+  const c = selectedClip(); if (c?.type !== 'image') return;
+  const value = Number(e.target.value); if (!Number.isFinite(value) || value < 0.05 || value > 3600) { e.target.value = duration(c); return; }
+  c.start = 0; c.end = value; seekLocal(0); setSelection(state.selected);
+});
+// Capture state before form controls mutate it. Timeline and project operations checkpoint explicitly.
+const editableControls = new Set(['trimStart','trimEnd','speed','ratio','mode','resolution','titleText','titleStart','titleEnd','titleColor','titlePosition','musicVolume','imageDuration']);
+document.addEventListener('input', e => { if (editableControls.has(e.target.id)) checkpoint(); }, true);
+document.addEventListener('change', e => { if (editableControls.has(e.target.id) && e.target.tagName === 'SELECT') checkpoint(); }, true);
+document.addEventListener('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z' && !['INPUT','TEXTAREA'].includes(document.activeElement?.tagName)) { e.preventDefault(); restore(e.shiftKey ? 'redo' : 'undo'); }
+});
+document.addEventListener('dragover', e => e.preventDefault());
+document.addEventListener('drop', async e => {
+  e.preventDefault(); if (!e.dataTransfer.files.length) return;
+  try { const files = await window.reeldesk.dropMedia(Array.from(e.dataTransfer.files)); if (!files.length) return; checkpoint(); const start = state.clips.length; state.clips.push(...files.slice(0, 50 - start).map(c => ({ ...c, start: 0, end: c.duration, speed: 1 }))); setSelection(Math.min(start, 49)); }
+  catch (err) { setStatus(err.message, true); }
+});
+updateHistory();

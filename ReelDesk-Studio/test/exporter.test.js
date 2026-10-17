@@ -21,7 +21,9 @@ test('rejects invalid edits and unpicked paths', () => {
 
 const hasFfmpeg = spawnSync(findBinary('ffmpeg'), ['-version']).status === 0 && spawnSync(findBinary('ffprobe'), ['-version']).status === 0;
 
-test('exports assembled clips with music and a timed title', { skip: !hasFfmpeg, timeout: 120000 }, async () => {
+const hasDrawtext = /\bdrawtext\b/.test(spawnSync(findBinary('ffmpeg'), ['-hide_banner', '-filters'], { encoding: 'utf8' }).stdout || '');
+
+for (const withTitle of [false, true]) test(`exports assembled clips with music${withTitle ? ' and a timed title' : ''}`, { skip: !hasFfmpeg || (withTitle && !hasDrawtext), timeout: 120000 }, async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'reeldesk-test-'));
   try {
     const one = path.join(temp, 'one.mp4');
@@ -47,7 +49,7 @@ test('exports assembled clips with music and a timed title', { skip: !hasFfmpeg,
       { id: 'one', start: 0.2, end: 1.2, speed: 1.25 },
       { id: 'two', start: 0, end: 1, speed: 1 }
     ], musicId: 'music', musicVolume: 0.15, ratio: '9:16', resolution: 720, mode: 'crop',
-    title: 'Day 01', titleStart: 0, titleEnd: 1, titlePosition: 'bottom' }, map);
+    title: withTitle ? 'Day 01' : '', titleStart: 0, titleEnd: 1, titlePosition: 'bottom' }, map);
     assert.equal(project.width, 720);
     const args = makeArgs(project, output, path.join(temp, 'title.txt'));
     assert(args.includes('-filter_complex'));

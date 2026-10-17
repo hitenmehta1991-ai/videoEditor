@@ -3,9 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' file: blob:; connect-src 'none'; object-src 'none'; frame-src 'none';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: file:; media-src 'self' file: blob:; connect-src 'none'; object-src 'none'; frame-src 'none';">
   <title>ReelDesk Studio</title>
   <link rel="stylesheet" href="./style.css">
+  <script src="./timeline.js" defer></script>
   <script src="./renderer.js" defer></script>
 </head>
 <body>
@@ -22,7 +23,7 @@
     <main class="workspace">
       <aside class="left-panel">
         <section class="sidebar-head"><div class="eyebrow">YOUR WORKSPACE</div><h2>Media bin</h2><p>Build a story, one clip at a time.</p></section>
-        <button id="importButton" class="button import" type="button"><span class="plus">+</span> Import videos</button>
+        <button id="importButton" class="button import" type="button"><span class="plus">+</span> Import media</button>
         <div class="panel-title"><span>CLIPS</span><span id="clipCount" class="counter">0</span></div>
         <div id="clipList" class="clip-list"><p class="muted small">Your imported clips appear here.</p></div>
         <section class="music-panel">
@@ -40,13 +41,14 @@
         <div class="stage-header"><div><div class="eyebrow">PREVIEW</div><h1 id="projectTitle">Untitled reel</h1></div><span class="preview-label">LIVE FRAME PREVIEW</span></div>
         <div class="preview-zone">
           <div id="videoFrame" class="video-frame" style="aspect-ratio:9/16">
+            <img id="imagePreview" alt="Selected photograph" hidden>
             <video id="preview" preload="metadata" playsinline></video>
             <div id="textPreview" class="overlay-text" hidden></div>
-            <div id="emptyPreview" class="empty-preview"><span class="empty-icon">▣</span><h2>Your next reel starts here</h2><p>Import a video to start editing</p><button id="emptyImport" class="button primary">+ Import video</button></div>
+            <div id="emptyPreview" class="empty-preview"><span class="empty-icon">▣</span><h2>Your next reel starts here</h2><p>Import videos or photographs to start editing</p><button id="emptyImport" class="button primary">+ Import media</button></div>
           </div>
         </div>
         <div class="player-controls"><button id="playButton" class="play-button" aria-label="Play or pause">▶</button><span id="currentTime" class="time">00:00</span><input id="seek" type="range" min="0" max="100" value="0" step="0.01" aria-label="Seek within selected clip"><span id="endTime" class="time">00:00</span><span class="fps-label">30 FPS EXPORT</span></div>
-        <div class="timeline-panel"><div class="timeline-head"><div><div class="eyebrow">STORYBOARD</div><h2>Sequence <small id="totalDuration">00:00 total</small></h2></div><button id="addToTimeline" class="button ghost">+ Add clip</button></div><div id="timeline" class="timeline"><div class="timeline-empty">Your timeline is empty · Add clips to begin</div></div></div>
+        <div class="timeline-panel"><div class="timeline-head"><div><div class="eyebrow">TIMELINE</div><h2>Sequence <small id="totalDuration">00:00 total</small></h2></div><div class="timeline-actions"><button id="undo" class="button ghost">Undo</button><button id="redo" class="button ghost">Redo</button><button id="split" class="button ghost">Split</button><label>Zoom <input id="zoom" type="range" min="12" max="120" value="40" aria-label="Timeline zoom"></label><button id="addToTimeline" class="button ghost">+ Add clip</button></div></div><div id="timeline" class="timeline"><div class="timeline-empty">Your timeline is empty · Add clips to begin</div></div></div>
       </section>
 
       <aside class="inspector">
@@ -58,6 +60,7 @@
         <div class="section-label">SELECTED CLIP</div>
         <div id="selectedHint" class="muted small">Choose a clip to adjust the trim.</div>
         <div class="field-pair"><div><label for="trimStart">Start (seconds)</label><input id="trimStart" type="number" min="0" step="0.1" value="0" disabled></div><div><label for="trimEnd">End (seconds)</label><input id="trimEnd" type="number" min="0" step="0.1" value="0" disabled></div></div>
+        <label for="imageDuration" id="imageDurationLabel" hidden>Image duration (seconds)</label><input id="imageDuration" type="number" min="0.05" max="3600" step="0.1" hidden>
         <label for="speed">Playback speed</label><select id="speed" disabled><option value="0.5">0.5× • Slow</option><option value="0.75">0.75×</option><option value="1" selected>1× • Normal</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2× • Fast</option></select>
         <div class="section-label">TEXT OVERLAY</div>
         <label for="titleText">Text on video</label><textarea id="titleText" rows="2" maxlength="160" placeholder="e.g. Day 01: Winter Arc"></textarea>

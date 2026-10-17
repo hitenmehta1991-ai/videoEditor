@@ -1,6 +1,7 @@
 'use strict';
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 contextBridge.exposeInMainWorld('reeldesk', Object.freeze({
+  dropMedia: files => ipcRenderer.invoke('drop-media', files.map(f => webUtils.getPathForFile(f))),
   chooseVideos: () => ipcRenderer.invoke('choose-videos'),
   chooseMusic: () => ipcRenderer.invoke('choose-music'),
   saveProject: p => ipcRenderer.invoke('save-project', p),

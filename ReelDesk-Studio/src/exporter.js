@@ -82,14 +82,15 @@ function normalizeProject(project, assetMap) {
   if (!['fit', 'crop'].includes(mode)) throw new Error('Invalid frame mode');
   const clips = project.clips.map(c => {
     const media = assetMap.get(c.id);
-    if (!media || media.type !== 'video') throw new Error('A clip is no longer available. Please import it again.');
+    if (!media || !['video', 'image'].includes(media.type)) throw new Error('A clip is no longer available. Please import it again.');
     if (!fs.existsSync(media.path)) throw new Error(`Missing clip: ${media.name}`);
     const start = Number(c.start), end = Number(c.end), speed = Number(c.speed);
     if (![start, end, speed].every(Number.isFinite) || start < 0 || end - start < 0.05 ||
-        end > media.duration + 0.05 || !SPEEDS.includes(speed)) {
+        end > (media.type === 'image' ? 3600 : media.duration) + 0.000001 || !SPEEDS.includes(speed)) {
       throw new Error(`Invalid trim/speed for ${media.name}`);
     }
-    const safeEnd = Math.min(end, media.duration);
+    const safeEnd = media.type === 'image' ? end : Math.min(end, media.duration);
+    if (safeEnd - start < 0.05 || (media.type === 'image' && speed !== 1)) throw new Error('Invalid clip duration');
     return { ...media, start, end: safeEnd, speed, adjustedDuration: (safeEnd - start) / speed };
   });
   const duration = clips.reduce((sum, c) => sum + c.adjustedDuration, 0);
@@ -126,7 +127,10 @@ function findFont() {
 
 function makeArgs(project, outputPath, textFilePath) {
   const args = ['-hide_banner', '-y'];
-  for (const c of project.clips) args.push('-i', c.path);
+  for (const c of project.clips) {
+    if (c.type === 'image') args.push('-loop', '1', '-framerate', '30');
+    args.push('-i', c.path);
+  }
   if (project.music) args.push('-stream_loop', '-1', '-i', project.music.path);
   const filters = [];
   project.clips.forEach((clip, i) => {
