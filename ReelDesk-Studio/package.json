@@ -1,0 +1,27 @@
+{
+  "name": "reeldesk-studio",
+  "productName": "ReelDesk Studio",
+  "version": "0.1.0",
+  "description": "Private, watermark-free desktop video editor for social videos",
+  "main": "src/main.js",
+  "author": "ReelDesk Studio",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test test/*.test.js",
+    "build:mac": "electron-builder --mac dmg",
+    "build:mac:dir": "electron-builder --mac dir"
+  },
+  "devDependencies": {
+    "electron": "44.8.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "studio.reeldesk.editor",
+    "productName": "ReelDesk Studio",
+    "directories": { "output": "release" },
+    "files": ["src/**/*", "package.json", "README.md"],
+    "mac": { "category": "public.app-category.video", "target": ["dmg"], "hardenedRuntime": false },
+    "dmg": { "title": "ReelDesk Studio" }
+  }
+}
