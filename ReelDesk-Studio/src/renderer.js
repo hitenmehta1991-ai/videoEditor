@@ -2,7 +2,7 @@
 
 const $ = id => document.getElementById(id);
 const state = {
-  clips: [], selected: -1, music: null, ratio: '9:16', mode: 'fit', resolution: 1080,
+  clips: [], selected: -1, music: null, audioTracks: [], musicFadeIn: 0, musicFadeOut: 0, ratio: '9:16', mode: 'fit', resolution: 1080,
   musicVolume: 0.2, title: '', titleStart: 0, titleEnd: 4,
   titleColor: 'white', titlePosition: 'bottom', exporting: false, lastExport: null
 };
@@ -16,11 +16,12 @@ function snapshot() {
   const { exporting, lastExport, ...editable } = state;
   return structuredClone(editable);
 }
-function checkpoint() { history.push(snapshot()); updateHistory(); }
+let editRevision = 0;
+function checkpoint() { editRevision++; closeSequence(); history.push(snapshot()); updateHistory(); }
 function updateHistory() { $('undo').disabled = !history.past.length; $('redo').disabled = !history.future.length; }
 function restore(direction) {
   const saved = history[direction](snapshot()); if (!saved) return;
-  video.pause(); imagePlaying = false; Object.assign(state, saved);
+  editRevision++; closeSequence(); video.pause(); imagePlaying = false; Object.assign(state, saved);
   const target = state.selected; state.selected = -1; setSelection(target); syncControls(); updateHistory();
 }
 function localTime() { const c = selectedClip(); return !c ? 0 : c.type === 'image' ? imageTime : (video.currentTime - c.start) / c.speed; }
@@ -28,7 +29,7 @@ function seekLocal(time) { const c = selectedClip(); if (!c) return; const t = M
 
 
 function duration(clip) { return Timeline.duration(clip); }
-function totalDuration() { return state.clips.reduce((sum, c) => sum + duration(c), 0); }
+function totalDuration() { return Timeline.total(state.clips); }
 function timeLabel(seconds) {
   const n = Math.max(0, Math.floor(Number(seconds) || 0));
   return `${String(Math.floor(n / 60)).padStart(2, '0')}:${String(n % 60).padStart(2, '0')}`;
@@ -45,7 +46,9 @@ function safeButton(label, action, title) {
 }
 function projectData() {
   return {
-    clips: state.clips.map(c => ({ id: c.id, start: c.start, end: c.end, speed: c.speed })),
+    clips: state.clips.map(c => ({ id: c.id, start: c.start, end: c.end, speed: c.speed, transition: c.transition, volume: c.volume, fadeIn: c.fadeIn, fadeOut: c.fadeOut })),
+    audioTracks: state.audioTracks.map(({ id, start, trimStart, trimEnd, volume, fadeIn, fadeOut, loop }) => ({ id, start, trimStart, trimEnd, volume, fadeIn, fadeOut, loop })),
+    musicFadeIn: state.musicFadeIn, musicFadeOut: state.musicFadeOut,
     musicId: state.music?.id || null, musicVolume: state.musicVolume,
     ratio: state.ratio, mode: state.mode, resolution: state.resolution,
     title: state.title, titleStart: state.titleStart, titleEnd: state.titleEnd,
@@ -54,11 +57,11 @@ function projectData() {
 }
 function titleTime() {
   const c = selectedClip(); if (!c) return -1;
-  let before = 0;
-  for (let i = 0; i < state.selected; i++) before += duration(state.clips[i]);
+  const before = Timeline.layout(state.clips)[state.selected].start;
   return before + localTime();
 }
 function updateOverlay() {
+  if (!$('sequencePreview').hidden) { $('textPreview').hidden = true; return; }
   const t = titleTime();
   $('textPreview').hidden = !(state.title.trim() && t >= state.titleStart && t <= state.titleEnd);
   $('textPreview').textContent = state.title;
@@ -66,6 +69,7 @@ function updateOverlay() {
   $('textPreview').className = `overlay-text ${state.titlePosition === 'bottom' ? '' : state.titlePosition}`;
 }
 function setSelection(index) {
+  closeSequence();
   if (index < 0 || index >= state.clips.length) index = -1;
   const changing = index !== state.selected;
   if (changing) { imagePlaying = false; imageTime = 0; }
@@ -96,10 +100,10 @@ function setSelection(index) {
     $('trimEnd').max = c.duration;
     $('trimStart').max = c.duration;
     $('speed').disabled = c.type === 'image';
-    video.playbackRate = c.speed;
+    video.playbackRate = c.speed; video.volume = Math.min(1, c.volume ?? 1);
     $('speed').value = String(c.speed);
   }
-  renderClipList(); renderTimeline(); updatePlayback();
+  syncClipAudio(); renderClipList(); renderTimeline(); updatePlayback();
 }
 function renderClipList() {
   const list = $('clipList'); list.replaceChildren(); $('clipCount').textContent = state.clips.length;
@@ -122,19 +126,24 @@ function renderClipList() {
 }
 function renderTimeline() {
   const view = $('timeline'); const scroll = view.scrollLeft; view.replaceChildren();
+  renderAudioLanes();
   $('totalDuration').textContent = `${totalDuration().toFixed(2)}s total`;
   if (!state.clips.length) { const div = document.createElement('div'); div.className = 'timeline-empty'; div.textContent = 'Drop videos or images here, or use Import media'; view.append(div); return; }
-  let before = 0;
+  const positions = Timeline.layout(state.clips);
   state.clips.forEach((c, i) => {
+    const before = positions[i].start;
     const item = document.createElement('div'); item.tabIndex = 0; item.setAttribute('role', 'button');
     item.className = `timeline-clip ${i === state.selected ? 'active' : ''}`;
     item.style.width = `${Math.max(2, duration(c) * pixelsPerSecond)}px`; item.draggable = true;
+    if (i) item.style.marginLeft = `${-positions[i - 1].overlap * pixelsPerSecond}px`;
+    item.style.zIndex = i === state.selected ? '2' : '1';
     item.title = `${c.name}: ${before.toFixed(2)}s – ${(before + duration(c)).toFixed(2)}s. Drag to reorder; drag edges to trim.`;
     const strip = document.createElement('div'); strip.className = 'thumbnail-strip';
     for (const src of c.thumbnails || []) { const img = document.createElement('img'); img.src = src; img.alt = ''; img.draggable = false; strip.append(img); }
     const name = document.createElement('strong'); name.textContent = `${before.toFixed(1)}s · ${c.name}`;
     const meta = document.createElement('span'); meta.textContent = `${duration(c).toFixed(2)}s · ${c.speed}×`;
     item.append(strip, name, meta);
+    if (positions[i].overlap) { const badge = document.createElement('small'); badge.className = 'transition-badge'; badge.textContent = `${Timeline.TRANSITIONS[positions[i].type]} · ${positions[i].overlap.toFixed(2)}s`; item.append(badge); }
     for (const edge of ['start', 'end']) {
       const handle = document.createElement('div'); handle.className = `trim-handle ${edge}`; handle.title = `Trim ${edge}`;
       handle.addEventListener('pointerdown', e => {
@@ -157,9 +166,9 @@ function renderTimeline() {
     item.addEventListener('dragend', () => { dragIndex = null; });
     item.addEventListener('dragover', e => { e.preventDefault(); });
     item.addEventListener('drop', e => { if (dragIndex === null) return; e.preventDefault(); e.stopPropagation(); const from = dragIndex; dragIndex = null; if (from !== i) { checkpoint(); state.clips = Timeline.reorder(state.clips, from, i); state.selected = -1; setSelection(i); } });
-    view.append(item); before += duration(c);
+    view.append(item);
   });
-  view.scrollLeft = scroll;
+  view.scrollLeft = scroll; renderAudioLanes();
 }
 function moveClip(index, amount) {
   const next = index + amount;
@@ -193,6 +202,8 @@ function updatePlayback() {
 }
 function syncControls() {
   $('ratio').value = state.ratio; $('mode').value = state.mode; $('resolution').value = String(state.resolution);
+  $('musicFadeIn').value = state.musicFadeIn; $('musicFadeOut').value = state.musicFadeOut;
+  renderAudioTracks();
   $('musicName').textContent = state.music?.name || 'No music selected';
   $('removeMusic').hidden = !state.music;
   $('musicVolume').value = String(Math.round(state.musicVolume * 100));
@@ -231,7 +242,7 @@ async function exportVideo() {
   if (state.exporting) return;
   if (!state.clips.length) { setStatus('Import a video clip first', true); return; }
   state.exporting = true; state.lastExport = null;
-  $('exportButton').disabled = true;
+  $('exportButton').disabled = $('previewSequence').disabled = true;
   $('progressContainer').hidden = false; $('progressFill').style.width = '0%'; $('progressPercent').textContent = '0%';
   $('revealButton').hidden = true;
   setStatus('Choose where to save your MP4…');
@@ -240,7 +251,7 @@ async function exportVideo() {
     if (result.cancelled) setStatus('Export dialog dismissed');
     else { state.lastExport = result.path; $('revealButton').hidden = false; setStatus('Export complete ✓ • Video saved without a watermark'); }
   } catch (err) { setStatus(err.message.length > 200 ? `${err.message.slice(0, 200)}…` : err.message, true); }
-  finally { state.exporting = false; $('progressContainer').hidden = true; $('exportButton').disabled = false; }
+  finally { state.exporting = false; $('progressContainer').hidden = true; $('exportButton').disabled = $('previewSequence').disabled = false; }
 }
 function updateExportProgress(pct) {
   if (!state.exporting) return;
@@ -255,7 +266,7 @@ async function openProject() {
   try {
     const project = await window.reeldesk.openProject(); if (!project) return;
     checkpoint();
-    Object.assign(state, { clips: project.clips, music: project.music, ratio: project.ratio || '9:16',
+    Object.assign(state, { clips: project.clips, music: project.music, audioTracks: project.audioTracks || [], musicFadeIn: Number(project.musicFadeIn || 0), musicFadeOut: Number(project.musicFadeOut || 0), ratio: project.ratio || '9:16',
       mode: project.mode || 'fit', resolution: Number(project.resolution || 1080),
       musicVolume: Number(project.musicVolume ?? 0.2), title: project.title || '',
       titleStart: Number(project.titleStart || 0), titleEnd: Number(project.titleEnd ?? 4),
@@ -330,7 +341,7 @@ $('imageDuration').addEventListener('change', e => {
   c.start = 0; c.end = value; seekLocal(0); setSelection(state.selected);
 });
 // Capture state before form controls mutate it. Timeline and project operations checkpoint explicitly.
-const editableControls = new Set(['trimStart','trimEnd','speed','ratio','mode','resolution','titleText','titleStart','titleEnd','titleColor','titlePosition','musicVolume','imageDuration']);
+const editableControls = new Set(['trimStart','trimEnd','speed','ratio','mode','resolution','titleText','titleStart','titleEnd','titleColor','titlePosition','musicVolume','imageDuration','musicFadeIn','musicFadeOut','transitionType','transitionDuration','clipVolume','clipFadeIn','clipFadeOut']);
 document.addEventListener('input', e => { if (editableControls.has(e.target.id)) checkpoint(); }, true);
 document.addEventListener('change', e => { if (editableControls.has(e.target.id) && e.target.tagName === 'SELECT') checkpoint(); }, true);
 document.addEventListener('keydown', e => {
@@ -343,3 +354,82 @@ document.addEventListener('drop', async e => {
   catch (err) { setStatus(err.message, true); }
 });
 updateHistory();
+
+function syncClipAudio() {
+  const c = selectedClip(); const hasNext = c && state.selected < state.clips.length - 1;
+  $('transitionType').disabled = $('transitionDuration').disabled = !hasNext;
+  $('transitionType').value = c?.transition?.type || 'none';
+  $('transitionDuration').value = c?.transition?.duration ?? 0.5;
+  const overlap = c ? Timeline.layout(state.clips)[state.selected].overlap : 0;
+  $('transitionHint').textContent = hasNext ? `Effective overlap: ${overlap.toFixed(2)}s. Limited to half of each clip; rounded to 30 fps.` : 'Select a clip with a following clip.';
+  for (const [id, field, fallback] of [['clipVolume','volume',1],['clipFadeIn','fadeIn',0],['clipFadeOut','fadeOut',0]]) {
+    $(id).disabled = !c || c.type === 'image' || c.hasAudio === false;
+    $(id).value = (c?.[field] ?? fallback) * (field === 'volume' ? 100 : 1);
+  }
+}
+for (const id of ['transitionType','transitionDuration','clipVolume','clipFadeIn','clipFadeOut']) $(id).addEventListener('change', () => {
+  const c = selectedClip(); if (!c) return;
+  const length = Number($('transitionDuration').value);
+  if (!Number.isFinite(length) || length < 0.05 || length > 5) { syncClipAudio(); return; }
+  c.transition = { type: $('transitionType').value, duration: length };
+  c.volume = Math.max(0, Math.min(2, Number($('clipVolume').value) / 100 || 0));
+  c.fadeIn = Math.max(0, Math.min(30, Number($('clipFadeIn').value) || 0)); c.fadeOut = Math.max(0, Math.min(30, Number($('clipFadeOut').value) || 0));
+  video.volume = Math.min(1, c.volume); syncClipAudio(); renderTimeline(); updateOverlay();
+});
+for (const [id, field] of [['musicFadeIn','musicFadeIn'],['musicFadeOut','musicFadeOut']]) $(id).addEventListener('change', e => { state[field] = Math.max(0, Math.min(30, Number(e.target.value) || 0)); e.target.value = state[field]; });
+function renderAudioTracks() {
+  const container = $('audioTracks'); container.replaceChildren();
+  state.audioTracks.forEach((track, i) => {
+    const card = document.createElement('section'); card.className = 'audio-track';
+    const name = document.createElement('strong'); name.textContent = track.name;
+    card.append(name, safeButton('Remove', () => { checkpoint(); state.audioTracks.splice(i, 1); renderAudioTracks(); renderAudioLanes(); }, 'Remove audio track'));
+    const fields = [['start','Timeline start (s)',0,3600,0],['trimStart','Source start (s)',0,track.duration,0],['trimEnd','Source end (s)',0,track.duration,track.duration],['volume','Volume (0–200%)',0,200,1],['fadeIn','Fade in (s)',0,30,0],['fadeOut','Fade out (s)',0,30,0]];
+    for (const [field, title, min, max, fallback] of fields) {
+      const label = document.createElement('label'); label.textContent = title;
+      const input = document.createElement('input'); input.type = 'number'; input.min = min; input.max = max; input.step = field === 'volume' ? '5' : '0.1'; input.value = (track[field] ?? fallback) * (field === 'volume' ? 100 : 1); input.dataset.field = field;
+      input.addEventListener('change', () => {
+        const value = Number(input.value); if (!Number.isFinite(value) || value < min || value > max || (field === 'trimStart' && value > (track.trimEnd ?? track.duration) - 0.05) || (field === 'trimEnd' && value < (track.trimStart || 0) + 0.05)) { renderAudioTracks(); return; }
+        checkpoint(); track[field] = field === 'volume' ? value / 100 : value; renderAudioLanes();
+      }); label.append(input); card.append(label);
+    }
+    const label = document.createElement('label'); const loop = document.createElement('input'); loop.type = 'checkbox'; loop.checked = track.loop === true; loop.dataset.field = 'loop';
+    loop.addEventListener('change', () => { checkpoint(); track.loop = loop.checked; renderAudioLanes(); }); label.append(loop, ' Loop trimmed section'); card.append(label); container.append(card);
+  });
+}
+$('addAudioTrack').addEventListener('click', async () => {
+  try { if (state.audioTracks.length >= 8) throw Error('Use up to 8 additional tracks'); const media = await window.reeldesk.chooseMusic(); if (!media) return;
+    checkpoint(); state.audioTracks.push({ ...media, start:0, trimStart:0, trimEnd:media.duration, volume:0.5, fadeIn:0, fadeOut:0, loop:false }); renderAudioTracks(); renderAudioLanes();
+  } catch (err) { setStatus(err.message, true); }
+});
+function renderAudioLanes() {
+  const lanes = $('audioLanes'); lanes.replaceChildren();
+  const tracks = [...(state.music ? [{ ...state.music, start: 0, loop: true }] : []), ...state.audioTracks];
+  for (const track of tracks) {
+    const row = document.createElement('div'); row.className = 'audio-lane'; row.style.width = `${Math.max(totalDuration(), track.start) * pixelsPerSecond}px`;
+    const block = document.createElement('div'); block.className = 'audio-block'; block.textContent = track.name;
+    block.style.left = `${track.start * pixelsPerSecond}px`; const remaining = Math.max(0, totalDuration() - track.start);
+    block.style.width = `${Math.min(remaining, track.loop ? remaining : (track.trimEnd ?? track.duration) - (track.trimStart || 0)) * pixelsPerSecond}px`;
+    block.title = `${track.name} · starts ${track.start}s`; row.append(block); lanes.append(row);
+  }
+  lanes.scrollLeft = $('timeline').scrollLeft;
+}
+$('timeline').addEventListener('scroll', () => { $('audioLanes').scrollLeft = $('timeline').scrollLeft; });
+function closeSequence() {
+  const preview = $('sequencePreview'); if (preview.hidden) return;
+  preview.pause(); preview.hidden = true; $('backToClip').hidden = true; $('clipPlayerControls').hidden = false;
+  const c = selectedClip(); video.style.display = c && c.type !== 'image' ? 'block' : 'none'; $('imagePreview').hidden = !c || c.type !== 'image'; updateOverlay();
+}
+$('backToClip').addEventListener('click', closeSequence);
+$('previewSequence').addEventListener('click', async () => {
+  if (state.exporting || !state.clips.length) return;
+  const revision = editRevision; state.exporting = true; $('exportButton').disabled = $('previewSequence').disabled = true;
+  $('progressContainer').hidden = false; setStatus('Rendering sequence preview…');
+  video.pause(); imagePlaying = false;
+  try { const url = await window.reeldesk.previewSequence(projectData());
+    if (revision !== editRevision) { setStatus('Edit changed during rendering. Render the preview again.'); return; }
+    video.style.display = 'none'; $('imagePreview').hidden = true; $('emptyPreview').hidden = true; $('textPreview').hidden = true;
+    $('sequencePreview').src = url; $('sequencePreview').hidden = false; $('sequencePreview').style.display = 'block'; $('backToClip').hidden = false; $('clipPlayerControls').hidden = true;
+    setStatus('Sequence preview ready • Includes transitions and the audio mix');
+  } catch (err) { setStatus(err.message, true); }
+  finally { state.exporting = false; $('progressContainer').hidden = true; $('exportButton').disabled = $('previewSequence').disabled = false; }
+});

@@ -5,12 +5,21 @@ const path = require('node:path');
 const fs = require('node:fs');
 const { pathToFileURL } = require('node:url');
 const crypto = require('node:crypto');
+const os = require('node:os');
 const { importMedia, cleanup } = require('./media');
 const { capture, findBinary, normalizeProject, runExport } = require('./exporter');
 
 let mainWindow = null;
 let currentExport = null;
 const assets = new Map();
+const previewDirs = [];
+async function audioAsset(filepath) {
+  const data = JSON.parse(await capture(findBinary('ffprobe'), ['-v', 'error', '-show_entries', 'format=duration:stream=codec_type,duration', '-of', 'json', filepath]));
+  const stream = data.streams?.find(s => s.codec_type === 'audio');
+  const duration = Number(data.format?.duration || stream?.duration);
+  if (!stream || !Number.isFinite(duration) || duration <= 0) throw Error('This file has no usable audio track');
+  return recordAsset(filepath, { duration }, 'music');
+}
 
 function assertCaller(event) {
   if (!mainWindow || event.sender !== mainWindow.webContents) throw new Error('Untrusted application request');
@@ -61,9 +70,7 @@ function setupIPC() {
     });
     if (selection.canceled || !selection.filePaths[0]) return null;
     const filepath = selection.filePaths[0];
-    const probe = JSON.parse(await capture(findBinary('ffprobe'), ['-v', 'error', '-show_entries', 'stream=codec_type', '-of', 'json', filepath]));
-    if (!probe.streams?.some(s => s.codec_type === 'audio')) throw new Error('This file has no audio track');
-    return recordAsset(filepath, {}, 'music');
+    return audioAsset(filepath);
   });
   ipcMain.handle('save-project', async (e, project) => {
     assertCaller(e);
@@ -76,12 +83,19 @@ function setupIPC() {
     const clips = project.clips.map(c => {
       const asset = assets.get(c.id);
       if (!asset || !['video', 'image'].includes(asset.type)) throw new Error('Project refers to an unavailable clip');
-      return { path: asset.originalPath || asset.path, type: asset.type, start: c.start, end: c.end, speed: c.speed };
+      return { path: asset.originalPath || asset.path, type: asset.type, start: c.start, end: c.end, speed: c.speed, transition: c.transition, volume: c.volume, fadeIn: c.fadeIn, fadeOut: c.fadeOut };
     });
     const music = project.musicId ? assets.get(project.musicId) : null;
     if (project.musicId && (!music || music.type !== 'music')) throw new Error('Project soundtrack is unavailable');
-    const payload = { format: 'reeldesk-project', version: 2, savedAt: new Date().toISOString(),
-      ...project, clips, musicPath: music?.path || null };
+    if (project.audioTracks && (!Array.isArray(project.audioTracks) || project.audioTracks.length > 8)) throw Error('Use up to 8 additional audio tracks');
+    const audioTracks = (project.audioTracks || []).map(track => {
+      const asset = assets.get(track.id);
+      if (!asset || asset.type !== 'music') throw Error('Audio track is unavailable');
+      const { id, ...edit } = track;
+      return { ...edit, path: asset.path };
+    });
+    const payload = { format: 'reeldesk-project', version: 3, savedAt: new Date().toISOString(),
+      ...project, clips, audioTracks, musicPath: music?.path || null };
     delete payload.musicId;
     fs.writeFileSync(dialogResult.filePath, JSON.stringify(payload, null, 2), 'utf8');
     return dialogResult.filePath;
@@ -99,14 +113,21 @@ function setupIPC() {
     for (const c of data.clips) {
       if (typeof c.path !== 'string' || !fs.existsSync(c.path)) throw new Error(`Missing project video: ${String(c.path)}`);
       const media = await importMedia(c.path);
-      clips.push({ ...recordAsset(c.path, media, media.type), start: c.start, end: c.end, speed: c.speed });
+      clips.push({ ...recordAsset(c.path, media, media.type), start: c.start, end: c.end, speed: c.speed, transition: c.transition, volume: c.volume, fadeIn: c.fadeIn, fadeOut: c.fadeOut });
     }
     let music = null;
     if (data.musicPath) {
       if (!fs.existsSync(data.musicPath)) throw new Error('Project background music file is missing');
-      music = recordAsset(data.musicPath, {}, 'music');
+      music = await audioAsset(data.musicPath);
     }
-    return { clips, music, ratio: data.ratio, mode: data.mode, resolution: data.resolution,
+    if (data.audioTracks && (!Array.isArray(data.audioTracks) || data.audioTracks.length > 8)) throw Error('Invalid audio tracks');
+    const audioTracks = [];
+    for (const track of data.audioTracks || []) {
+      if (typeof track.path !== 'string' || !fs.existsSync(track.path)) throw Error('Project audio file is missing');
+      const media = await audioAsset(track.path);
+      audioTracks.push({ ...media, start: track.start, trimStart: track.trimStart, trimEnd: track.trimEnd, volume: track.volume, fadeIn: track.fadeIn, fadeOut: track.fadeOut, loop: track.loop });
+    }
+    return { clips, music, audioTracks, musicFadeIn: data.musicFadeIn, musicFadeOut: data.musicFadeOut, ratio: data.ratio, mode: data.mode, resolution: data.resolution,
       musicVolume: data.musicVolume, title: data.title, titleStart: data.titleStart, titleEnd: data.titleEnd,
       titlePosition: data.titlePosition, titleColor: data.titleColor };
   });
@@ -120,7 +141,7 @@ function setupIPC() {
     });
     if (saveResult.canceled || !saveResult.filePath) return { cancelled: true };
     const output = saveResult.filePath;
-    if (normalized.clips.some(c => (c.path === output || c.originalPath === output)) || normalized.music?.path === output) {
+    if (normalized.clips.some(c => (c.path === output || c.originalPath === output)) || normalized.music?.path === output || normalized.audioTracks.some(track => track.path === output)) {
       throw new Error('Choose an output path different from your source files');
     }
     // The child process uses argument arrays, not shell commands.
@@ -131,6 +152,24 @@ function setupIPC() {
       await currentExport.promise;
       return { cancelled: false, path: output };
     } finally { currentExport = null; }
+  });
+  ipcMain.handle('preview-sequence', async (e, project) => {
+    assertCaller(e);
+    if (currentExport) throw Error('A render is already running');
+    const normalized = normalizeProject({ ...project, resolution: 720 }, assets);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'reeldesk-preview-')); previewDirs.push(dir);
+    const output = path.join(dir, 'preview.mp4');
+    currentExport = runExport(normalized, output, progress => {
+      if (!mainWindow?.isDestroyed()) mainWindow.webContents.send('export-progress', progress);
+    });
+    try {
+      await currentExport.promise;
+      while (previewDirs.length > 2) fs.rmSync(previewDirs.shift(), { recursive: true, force: true });
+      return pathToFileURL(output).href;
+    } catch (err) {
+      fs.rmSync(dir, { recursive: true, force: true }); previewDirs.splice(previewDirs.indexOf(dir), 1); throw err;
+    }
+    finally { currentExport = null; }
   });
   ipcMain.handle('cancel-export', e => {
     assertCaller(e);
@@ -162,5 +201,5 @@ app.whenReady().then(() => {
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
 app.on('before-quit', () => { if (currentExport) currentExport.cancel(); });
-app.on('will-quit', cleanup);
+app.on('will-quit', () => { cleanup(); for (const dir of previewDirs) fs.rmSync(dir, { recursive: true, force: true }); });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });

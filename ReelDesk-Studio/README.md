@@ -2,16 +2,18 @@
 
 **A free-to-run, local, no-watermark Reels/Shorts editor prototype.** Built with Electron and FFmpeg. Video files remain on your Mac. Unlike Instagram/Meta's Edits, this is an independent app, not an official product or clone.
 
-## What works in version 0.1
+## What works in version 0.3
 
-- Import multiple MP4/MOV/M4V/WEBM/MKV/AVI videos; order clips using ↑ ↓, remove unwanted clips
+- Import MP4/MOV/M4V/WEBM/MKV/AVI videos and JPG/PNG/WebP images; arrange thumbnail clips by dragging, trim edges, split, zoom, and undo/redo
 - Preview selected clips, pause/seek, trim start/end, speed at 0.5×–2×
 - Export to 9:16 Reels, 4:5, 1:1, 16:9 using **Fit** (black bars) or **Crop** (center crop)
-- Add an optional background soundtrack, with volume control. Original audio is preserved.
+- Add a background soundtrack and up to eight additional music/voiceover tracks, with timeline offsets, source trims, looping, volume, and fades. Set original clip volume or mute it.
 - Add one timed text overlay to the **whole** export; choose position and color
 - Export H.264/AAC MP4 in 720p, 1080p, or 2160p (where feasible), with **no added watermark**
 - Save and reopen editable `.json` projects (references original clips; keep them on disk)
-- Entirely local; no sign-in, cloud service or analytics; optional soundtrack is only applied to export
+- Eight transition styles with adjustable duration; timeline and export account for their overlap
+- Render a complete sequence preview with transitions and audio before exporting
+- Entirely local; no sign-in, cloud service or analytics
 
 ## Requirements
 
@@ -75,3 +77,7 @@ MIT. This is independent software and not affiliated with Instagram, Edits or Me
 ## v0.2 timeline update
 
 See [V0.2.md](V0.2.md) for the available timeline/image features, validation, setup, and remaining roadmap items.
+
+## v0.3 transitions and audio
+
+See [V0.3.md](V0.3.md) for transitions, clip audio, additional music/voiceover tracks, rendered sequence preview, tests, and remaining work.

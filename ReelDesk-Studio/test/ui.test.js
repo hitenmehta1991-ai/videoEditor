@@ -13,7 +13,7 @@ test('timeline UI: import, split, reorder, trim, image duration, undo/redo and e
     await page.addInitScript(() => {
       const thumb = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="160" height="90"><rect width="160" height="90" fill="red"/></svg>');
       const image = id => ({ id, name:id+'.png', type:'image', url:thumb, thumbnails:[thumb], duration:5, width:160, height:90 });
-      window.reeldesk = { chooseVideos:async () => [image('first'),image('second')], chooseMusic:async () => null,
+      window.reeldesk = { chooseVideos:async () => [image('first'),image('second')], chooseMusic:async () => ({id:'voice',name:'voice.wav',duration:2}), previewSequence:async () => 'file:///tmp/reeldesk-ui-preview.mp4',
         saveProject:async p => { window.savedProject=p; return 'saved'; }, openProject:async () => null,
         exportVideo:async p => { window.exportPayload=p; return { cancelled:true }; }, onExportProgress:()=>{}, cancelExport:()=>{}, revealExport:()=>{} };
     });
@@ -34,6 +34,20 @@ test('timeline UI: import, split, reorder, trim, image duration, undo/redo and e
     await page.locator('#exportButton').click();
     const output = await page.evaluate(() => window.exportPayload); assert.equal(output.clips[0].end, 6); assert.equal(output.clips.length, 3);
     await page.locator('#undo').click(); await page.locator('#exportButton').click(); assert.equal((await page.evaluate(() => window.exportPayload)).clips[0].end, 7);
+    await page.locator('#transitionType').selectOption('fade');
+    await page.locator('#transitionDuration').fill('0.5'); await page.locator('#transitionDuration').press('Tab');
+    assert.match(await page.locator('#totalDuration').textContent(), /11.50s/);
+    await page.locator('#addAudioTrack').click();
+    const track = page.locator('.audio-track'); await track.locator('[data-field="start"]').fill('1'); await track.locator('[data-field="start"]').press('Tab');
+    await track.locator('[data-field="fadeIn"]').fill('0.2'); await track.locator('[data-field="fadeIn"]').press('Tab');
+    await track.locator('[data-field="loop"]').check();
+    await page.locator('#exportButton').click();
+    const edited = await page.evaluate(() => window.exportPayload);
+    assert.equal(edited.clips[0].transition.type, 'fade'); assert.equal(edited.audioTracks[0].start,1); assert.equal(edited.audioTracks[0].fadeIn,0.2); assert.equal(edited.audioTracks[0].loop,true);
+    await page.locator('#previewSequence').click(); await page.locator('#backToClip').waitFor(); assert.equal(await page.locator('#sequencePreview').isVisible(),true);
+    await page.locator('#backToClip').click(); assert.equal(await page.locator('#sequencePreview').isVisible(),false);
+    await track.getByRole('button', {name:'Remove'}).click(); assert.equal(await page.locator('.audio-track').count(),0);
+    await page.locator('#undo').click(); assert.equal(await page.locator('.audio-track').count(),1);
     assert.deepEqual(errors, []);
     if (process.env.UI_SCREENSHOT) await page.screenshot({ path:process.env.UI_SCREENSHOT });
   } finally { await browser.close(); }
