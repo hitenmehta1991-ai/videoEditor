@@ -15,6 +15,7 @@
       <div class="branding"><span class="logo">▶</span><span><strong>ReelDesk</strong><small>STUDIO • LOCAL EDITOR</small></span></div>
       <div class="header-center"><span class="pulse"></span> On-device editing <span class="sep">/</span> No watermark</div>
       <div class="head-actions">
+        <button class="button ghost" id="previewSequence">Preview sequence</button><button class="button ghost" id="backToClip" hidden>Back to clip</button>
         <button class="button ghost" id="openProject">Open project</button>
         <button class="button ghost" id="saveProject">Save</button>
         <button class="button primary" id="exportButton">↗ Export MP4</button>
@@ -32,7 +33,9 @@
           <div class="two-actions"><button id="musicButton" class="button outline">+ Add music</button><button id="removeMusic" class="button small-button" title="Remove music" hidden>✕</button></div>
           <div class="inline-control"><label for="musicVolume">Music volume</label><output id="musicVolumeLabel">20%</output></div>
           <input id="musicVolume" type="range" min="0" max="100" value="20">
-          <p class="footnote">Soundtrack is applied to the exported video.</p>
+          <div class="field-pair"><div><label for="musicFadeIn">Fade in (s)</label><input id="musicFadeIn" type="number" min="0" max="30" step="0.1" value="0"></div><div><label for="musicFadeOut">Fade out (s)</label><input id="musicFadeOut" type="number" min="0" max="30" step="0.1" value="0"></div></div>
+          <p class="footnote">Use Preview sequence to hear the mix.</p>
+          <button id="addAudioTrack" class="button outline">+ Music / voiceover track</button><div id="audioTracks" class="audio-tracks"></div>
         </section>
         <div class="privacy-note">◈ Your videos stay on your Mac. No upload, login, or subscription.</div>
       </aside>
@@ -42,13 +45,14 @@
         <div class="preview-zone">
           <div id="videoFrame" class="video-frame" style="aspect-ratio:9/16">
             <img id="imagePreview" alt="Selected photograph" hidden>
+            <video id="sequencePreview" controls hidden playsinline></video>
             <video id="preview" preload="metadata" playsinline></video>
             <div id="textPreview" class="overlay-text" hidden></div>
             <div id="emptyPreview" class="empty-preview"><span class="empty-icon">▣</span><h2>Your next reel starts here</h2><p>Import videos or photographs to start editing</p><button id="emptyImport" class="button primary">+ Import media</button></div>
           </div>
         </div>
-        <div class="player-controls"><button id="playButton" class="play-button" aria-label="Play or pause">▶</button><span id="currentTime" class="time">00:00</span><input id="seek" type="range" min="0" max="100" value="0" step="0.01" aria-label="Seek within selected clip"><span id="endTime" class="time">00:00</span><span class="fps-label">30 FPS EXPORT</span></div>
-        <div class="timeline-panel"><div class="timeline-head"><div><div class="eyebrow">TIMELINE</div><h2>Sequence <small id="totalDuration">00:00 total</small></h2></div><div class="timeline-actions"><button id="undo" class="button ghost">Undo</button><button id="redo" class="button ghost">Redo</button><button id="split" class="button ghost">Split</button><label>Zoom <input id="zoom" type="range" min="12" max="120" value="40" aria-label="Timeline zoom"></label><button id="addToTimeline" class="button ghost">+ Add clip</button></div></div><div id="timeline" class="timeline"><div class="timeline-empty">Your timeline is empty · Add clips to begin</div></div></div>
+        <div class="player-controls" id="clipPlayerControls"><button id="playButton" class="play-button" aria-label="Play or pause">▶</button><span id="currentTime" class="time">00:00</span><input id="seek" type="range" min="0" max="100" value="0" step="0.01" aria-label="Seek within selected clip"><span id="endTime" class="time">00:00</span><span class="fps-label">30 FPS EXPORT</span></div>
+        <div class="timeline-panel"><div class="timeline-head"><div><div class="eyebrow">TIMELINE</div><h2>Sequence <small id="totalDuration">00:00 total</small></h2></div><div class="timeline-actions"><button id="undo" class="button ghost">Undo</button><button id="redo" class="button ghost">Redo</button><button id="split" class="button ghost">Split</button><label>Zoom <input id="zoom" type="range" min="12" max="120" value="40" aria-label="Timeline zoom"></label><button id="addToTimeline" class="button ghost">+ Add clip</button></div></div><div id="timeline" class="timeline"><div class="timeline-empty">Your timeline is empty · Add clips to begin</div></div><div id="audioLanes" class="audio-lanes" aria-label="Audio track timing"></div></div>
       </section>
 
       <aside class="inspector">
@@ -62,6 +66,12 @@
         <div class="field-pair"><div><label for="trimStart">Start (seconds)</label><input id="trimStart" type="number" min="0" step="0.1" value="0" disabled></div><div><label for="trimEnd">End (seconds)</label><input id="trimEnd" type="number" min="0" step="0.1" value="0" disabled></div></div>
         <label for="imageDuration" id="imageDurationLabel" hidden>Image duration (seconds)</label><input id="imageDuration" type="number" min="0.05" max="3600" step="0.1" hidden>
         <label for="speed">Playback speed</label><select id="speed" disabled><option value="0.5">0.5× • Slow</option><option value="0.75">0.75×</option><option value="1" selected>1× • Normal</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2× • Fast</option></select>
+        <div class="section-label">TRANSITION TO NEXT CLIP</div>
+        <label for="transitionType">Style</label><select id="transitionType"><option value="none">Cut</option><option value="fade">Crossfade</option><option value="dissolve">Dissolve</option><option value="slideleft">Slide left</option><option value="slideright">Slide right</option><option value="wipeleft">Wipe</option><option value="zoomin">Zoom</option><option value="fadeblack">Fade through black</option><option value="fadewhite">Flash</option></select>
+        <label for="transitionDuration">Duration (seconds)</label><input id="transitionDuration" type="number" min="0.05" max="5" step="0.05" value="0.5"><p id="transitionHint" class="footnote"></p>
+        <div class="section-label">CLIP AUDIO</div>
+        <label for="clipVolume">Volume (0–200%)</label><input id="clipVolume" type="number" min="0" max="200" step="5" value="100">
+        <div class="field-pair"><div><label for="clipFadeIn">Fade in (s)</label><input id="clipFadeIn" type="number" min="0" max="30" step="0.1" value="0"></div><div><label for="clipFadeOut">Fade out (s)</label><input id="clipFadeOut" type="number" min="0" max="30" step="0.1" value="0"></div></div>
         <div class="section-label">TEXT OVERLAY</div>
         <label for="titleText">Text on video</label><textarea id="titleText" rows="2" maxlength="160" placeholder="e.g. Day 01: Winter Arc"></textarea>
         <div class="field-pair"><div><label for="titleStart">From (seconds)</label><input id="titleStart" type="number" min="0" step="0.1" value="0"></div><div><label for="titleEnd">To (seconds)</label><input id="titleEnd" type="number" min="0" step="0.1" value="4"></div></div>

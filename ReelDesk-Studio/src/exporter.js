@@ -4,6 +4,7 @@ const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+const Timeline = require('./timeline');
 
 const RATIOS = Object.freeze({
   '9:16': [9, 16],
@@ -71,6 +72,18 @@ function dimensions(ratio, resolution) {
   return { width: w, height: h };
 }
 
+function bounded(value, fallback, min, max, name) {
+  const n = Number(value ?? fallback);
+  if (!Number.isFinite(n) || n < min || n > max) throw Error(`Invalid ${name}`);
+  return n;
+}
+function audioSettings(c) {
+  return { volume: bounded(c.volume, 1, 0, 2, 'volume'), fadeIn: bounded(c.fadeIn, 0, 0, 30, 'fade in'), fadeOut: bounded(c.fadeOut, 0, 0, 30, 'fade out') };
+}
+function gainAndFades(c, length) {
+  const fadeIn = Math.min(c.fadeIn || 0, length / 2), fadeOut = Math.min(c.fadeOut || 0, length / 2);
+  return `volume=${fixed(c.volume ?? 1)}` + (fadeIn ? `,afade=t=in:st=0:d=${fixed(fadeIn)}` : '') + (fadeOut ? `,afade=t=out:st=${fixed(length - fadeOut)}:d=${fixed(fadeOut)}` : '');
+}
 function normalizeProject(project, assetMap) {
   if (!project || !Array.isArray(project.clips) || project.clips.length < 1 || project.clips.length > 50) {
     throw new Error('Add 1–50 clips before exporting');
@@ -91,9 +104,10 @@ function normalizeProject(project, assetMap) {
     }
     const safeEnd = media.type === 'image' ? end : Math.min(end, media.duration);
     if (safeEnd - start < 0.05 || (media.type === 'image' && speed !== 1)) throw new Error('Invalid clip duration');
-    return { ...media, start, end: safeEnd, speed, adjustedDuration: (safeEnd - start) / speed };
+    return { ...media, ...audioSettings(c), transition: c.transition, start, end: safeEnd, speed, adjustedDuration: (safeEnd - start) / speed };
   });
-  const duration = clips.reduce((sum, c) => sum + c.adjustedDuration, 0);
+  const layout = Timeline.layout(clips);
+  const duration = Timeline.total(clips);
   if (duration > 3600) throw new Error('Maximum supported project duration is 60 minutes');
   let music = null;
   if (project.musicId) {
@@ -102,6 +116,21 @@ function normalizeProject(project, assetMap) {
   }
   const musicVolume = Number(project.musicVolume ?? 0.2);
   if (!Number.isFinite(musicVolume) || musicVolume < 0 || musicVolume > 1) throw new Error('Music volume must be 0–1');
+  const tracks = project.audioTracks ?? [];
+  if (!Array.isArray(tracks) || tracks.length > 8) throw Error('Use up to 8 additional audio tracks');
+  const audioTracks = tracks.map(track => {
+    const media = assetMap.get(track.id);
+    if (!media || media.type !== 'music' || !fs.existsSync(media.path)) throw Error('Audio track is missing');
+    const sourceDuration = Number(media.duration);
+    if (!Number.isFinite(sourceDuration) || sourceDuration <= 0) throw Error('Audio duration is unavailable; import the track again');
+    const trimStart = bounded(track.trimStart, 0, 0, sourceDuration, 'audio trim start');
+    const trimEnd = bounded(track.trimEnd, sourceDuration, 0, sourceDuration, 'audio trim end');
+    if (trimEnd - trimStart < 0.05) throw Error('Audio trim must leave at least 0.05 seconds');
+    const start = bounded(track.start, 0, 0, 3600, 'audio timeline start');
+    if (track.loop !== undefined && typeof track.loop !== 'boolean') throw Error('Invalid audio loop');
+    return { ...media, ...audioSettings(track), trimStart, trimEnd, start, loop: track.loop === true };
+  });
+  const musicFades = { fadeIn: bounded(project.musicFadeIn, 0, 0, 30, 'music fade in'), fadeOut: bounded(project.musicFadeOut, 0, 0, 30, 'music fade out') };
   const title = String(project.title || '').slice(0, 160).trim();
   const titleStart = Number(project.titleStart ?? 0);
   const requestedTitleEnd = Number(project.titleEnd ?? Math.min(4, duration));
@@ -112,7 +141,7 @@ function normalizeProject(project, assetMap) {
   if (title && (![titleStart, requestedTitleEnd].every(Number.isFinite) || titleStart < 0 || titleEnd < titleStart || titleStart > duration)) {
     throw new Error('Title timings must fall within the final video');
   }
-  return { clips, music, musicVolume, title, titleStart, titleEnd, titleColor, titlePosition,
+  return { clips, layout, audioTracks, musicFades, music, musicVolume, title, titleStart, titleEnd, titleColor, titlePosition,
     width, height, ratio, resolution, mode, duration };
 }
 
@@ -132,6 +161,7 @@ function makeArgs(project, outputPath, textFilePath) {
     args.push('-i', c.path);
   }
   if (project.music) args.push('-stream_loop', '-1', '-i', project.music.path);
+  for (const track of project.audioTracks || []) args.push('-i', track.path);
   const filters = [];
   project.clips.forEach((clip, i) => {
     const dur = fixed(clip.adjustedDuration);
@@ -139,21 +169,26 @@ function makeArgs(project, outputPath, textFilePath) {
     const frame = project.mode === 'crop'
       ? `crop=${project.width}:${project.height}`
       : `pad=${project.width}:${project.height}:(ow-iw)/2:(oh-ih)/2:black`;
-    filters.push(`[${i}:v:0]trim=start=${fixed(clip.start)}:end=${fixed(clip.end)},setpts=(PTS-STARTPTS)/${fixed(clip.speed)},${scale},${frame},setsar=1,fps=30,format=yuv420p,trim=duration=${dur},setpts=PTS-STARTPTS[v${i}]`);
-    const audioFilters = `aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,apad,atrim=duration=${dur},asetpts=PTS-STARTPTS[a${i}]`;
+    filters.push(`[${i}:v:0]trim=start=${fixed(clip.start)}:end=${fixed(clip.end)},setpts=(PTS-STARTPTS)/${fixed(clip.speed)},${scale},${frame},setsar=1,fps=30,format=yuv420p,trim=duration=${dur},setpts=PTS-STARTPTS,settb=AVTB[v${i}]`);
+    const audioFilters = `aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,apad,atrim=duration=${dur},asetpts=PTS-STARTPTS,${gainAndFades(clip, clip.adjustedDuration)}[a${i}]`;
     if (clip.hasAudio) {
       filters.push(`[${i}:a:0]atrim=start=${fixed(clip.start)}:end=${fixed(clip.end)},asetpts=PTS-STARTPTS,atempo=${fixed(clip.speed)},${audioFilters}`);
     } else {
-      filters.push(`anullsrc=r=48000:cl=stereo,atrim=duration=${dur},asetpts=PTS-STARTPTS[a${i}]`);
+      filters.push(`anullsrc=r=48000:cl=stereo,atrim=duration=${dur},asetpts=PTS-STARTPTS,${gainAndFades(clip, clip.adjustedDuration)}[a${i}]`);
     }
   });
-  let videoTag, audioTag;
-  if (project.clips.length === 1) {
-    videoTag = '[v0]'; audioTag = '[a0]';
-  } else {
-    const inputs = project.clips.map((_, i) => `[v${i}][a${i}]`).join('');
-    filters.push(`${inputs}concat=n=${project.clips.length}:v=1:a=1[vcat][acat]`);
-    videoTag = '[vcat]'; audioTag = '[acat]';
+  let videoTag = '[v0]', audioTag = '[a0]';
+  const layout = project.layout || Timeline.layout(project.clips);
+  for (let i = 1; i < project.clips.length; i++) {
+    const boundary = layout[i - 1];
+    if (boundary.overlap) {
+      filters.push(`${videoTag}[v${i}]xfade=transition=${boundary.type}:duration=${fixed(boundary.overlap)}:offset=${fixed(layout[i].start)}[vjoin${i}]`);
+      filters.push(`${audioTag}[a${i}]acrossfade=d=${fixed(boundary.overlap)}:c1=tri:c2=tri[ajoin${i}]`);
+    } else {
+      filters.push(`${videoTag}[v${i}]concat=n=2:v=1:a=0,settb=AVTB[vjoin${i}]`);
+      filters.push(`${audioTag}[a${i}]concat=n=2:v=0:a=1[ajoin${i}]`);
+    }
+    videoTag = `[vjoin${i}]`; audioTag = `[ajoin${i}]`;
   }
   if (project.title && project.titleEnd > project.titleStart) {
     const font = findFont();
@@ -168,9 +203,23 @@ function makeArgs(project, outputPath, textFilePath) {
   }
   if (project.music) {
     const index = project.clips.length;
-    filters.push(`[${index}:a:0]atrim=duration=${fixed(project.duration)},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,volume=${fixed(project.musicVolume)}[bg]`);
-    filters.push(`${audioTag}[bg]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95[aout]`);
+    filters.push(`[${index}:a:0]atrim=duration=${fixed(project.duration)},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,${gainAndFades({ volume: project.musicVolume, ...project.musicFades }, project.duration)}[bg]`);
+    filters.push(`${audioTag}[bg]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95:level=0:latency=1[aout]`);
     audioTag = '[aout]';
+  }
+  const trackTags = [];
+  (project.audioTracks || []).forEach((track, i) => {
+    // A track beyond the end remains editable but contributes no samples to this export.
+    if (track.start >= project.duration) return;
+    const index = project.clips.length + (project.music ? 1 : 0) + i;
+    const length = Math.min(project.duration - track.start, track.loop ? Infinity : track.trimEnd - track.trimStart);
+    const loop = track.loop ? `,aloop=loop=-1:size=${Math.max(1, Math.round((track.trimEnd - track.trimStart) * 48000))}` : '';
+    filters.push(`[${index}:a:0]atrim=start=${fixed(track.trimStart)}:end=${fixed(track.trimEnd)},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo${loop},atrim=duration=${fixed(length)},${gainAndFades(track, length)},adelay=${Math.round(track.start * 1000)}:all=1[track${i}]`);
+    trackTags.push(`[track${i}]`);
+  });
+  if (trackTags.length) {
+    filters.push(`${audioTag}${trackTags.join('')}amix=inputs=${trackTags.length + 1}:duration=first:normalize=0,alimiter=limit=0.95:level=0:latency=1[amixed]`);
+    audioTag = '[amixed]';
   }
   args.push('-filter_complex', filters.join(';'), '-map', videoTag, '-map', audioTag,
     '-c:v', 'libx264', '-preset', 'medium', '-crf', '19', '-pix_fmt', 'yuv420p',
